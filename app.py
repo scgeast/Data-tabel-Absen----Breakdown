@@ -2,25 +2,25 @@ import streamlit as st
 import pandas as pd
 from datetime import datetime
 
-# --- Helper: Parse date from Excel header (e.g., "5/11/26") ---
-def parse_excel_date(date_str):
-    # Format: M/D/YY → convert to DD/MM/YYYY
-    try:
-        d = datetime.strptime(date_str, "%m/%d/%y")
-        return d.strftime("%d/%m/%Y")
-    except:
-        return date_str
-
-# --- Shift mapping from INDEX table ---
+# --- SHIFT MAPPING (dari INDEX) ---
 SHIFT_MAP = {
-    "1": {"check_in": "07:00", "check_out": "15:00"},
-    "2": {"check_in": "15:00", "check_out": "23:00"},
-    "3": {"check_in": "23:00", "check_out": "06:00"},
-    "11": {"check_in": "07:00", "check_out": "12:00"},
-    "22": {"check_in": "15:00", "check_out": "20:00"},
+    ("DISPATCHER", "1"): {"check_in": "07:00", "check_out": "15:00"},
+    ("DISPATCHER", "2"): {"check_in": "15:00", "check_out": "23:00"},
+    ("DISPATCHER", "3"): {"check_in": "23:00", "check_out": "06:00"},
+    ("DISPATCHER", "11"): {"check_in": "07:00", "check_out": "12:00"},
+    ("DISPATCHER", "22"): {"check_in": "15:00", "check_out": "20:00"},
+    ("BOOKING EAST", "1"): {"check_in": "08:00", "check_out": "16:00"},
+    ("BOOKING EAST", "11"): {"check_in": "08:00", "check_out": "13:00"},
 }
 
-# --- Main App ---
+def parse_excel_date(date_str):
+    try:
+        # Format: M/D/YY → e.g., "5/11/26"
+        d = datetime.strptime(date_str, "%m/%d/%y")
+        return d.strftime("%d/%m/%Y")
+    except Exception:
+        return str(date_str)
+
 st.title("📄 Absensi → Format Laporan")
 st.caption("Upload file Excel absensi (format seperti contoh Anda) untuk dikonversi ke tabel standar.")
 
@@ -28,101 +28,98 @@ uploaded_file = st.file_uploader("Upload Excel file (.xlsx)", type=["xlsx"])
 
 if uploaded_file:
     try:
-        # Read the Excel file
         df = pd.read_excel(uploaded_file, sheet_name=0, header=None)
 
-        # Find start of data: look for row with "Name" and "Jobdesk"
-        name_row_idx = None
-        for i, row in df.iterrows():
-            if "Name" in str(row.values) and "Jobdesk" in str(row.values):
-                name_row_idx = i
-                break
+        # Cari baris dengan "Jobdesk" dan "Name" yang *berdekatan* dan *di bawah tanggal/hari*
+        # Kita tahu: baris 10 = tanggal, baris 9 = hari, jadi data karyawan mulai baris 13+
+        # Alternatif: cari baris yang kolom 0 == "DISPATCHER" atau "BOOKING EAST"
+        data_rows = []
+        for i in range(df.shape[0]):
+            val0 = str(df.iloc[i, 0]).strip()
+            if val0 in ["DISPATCHER", "BOOKING EAST"]:
+                # Pastikan kolom 1 ada nama
+                val1 = str(df.iloc[i, 1]).strip()
+                if val1 and val1 not in ["nan", "Name"]:
+                    data_rows.append(i)
 
-        if name_row_idx is None:
-            st.error("Tidak ditemukan header 'Name' dan 'Jobdesk'. Pastikan format file sesuai.")
+        if not data_rows:
+            st.error("❌ Tidak ditemukan baris karyawan (kolom 0 = 'DISPATCHER' / 'BOOKING EAST').")
         else:
-            # Extract column headers (dates)
-            date_headers = df.iloc[name_row_idx + 1].dropna().tolist()
-            # Clean up: remove empty or non-date strings
-            date_headers = [h for h in date_headers if isinstance(h, str) and "/" in h]
-            dates = [parse_excel_date(h) for h in date_headers]
+            # Ambil baris tanggal (baris 10) dan hari (baris 9)
+            date_row = df.iloc[10].dropna().tolist()
+            day_row = df.iloc[9].dropna().tolist()
 
-            # Extract day names (Mon, Tue, ...) — assume they're in row above dates (row name_row_idx)
-            day_headers = df.iloc[name_row_idx].dropna().tolist()
-            days = [d for d in day_headers if d in ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]]
-
-            # Ensure alignment: should have same length
-            if len(dates) != len(days):
-                # Fallback: generate days from dates
-                days = []
-                for d_str in dates:
-                    try:
-                        d = datetime.strptime(d_str, "%d/%m/%Y")
-                        days.append(d.strftime("%a").title())  # Mon, Tue, etc.
-                    except:
+            # Filter hanya kolom yang berisi tanggal (format M/D/YY)
+            dates = []
+            days = []
+            for i, cell in enumerate(date_row):
+                if isinstance(cell, str) and "/" in cell:
+                    dates.append(parse_excel_date(cell))
+                    # Ambil hari dari baris 9 pada posisi yang sama
+                    if i < len(day_row):
+                        d = str(day_row[i]).strip()
+                        if d in ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]:
+                            days.append(d)
+                        else:
+                            # fallback: hitung dari tanggal
+                            try:
+                                dt = datetime.strptime(dates[-1], "%d/%m/%Y")
+                                days.append(dt.strftime("%a").title())
+                            except:
+                                days.append("Unknown")
+                    else:
                         days.append("Unknown")
 
-            # Extract employee rows
-            data_start_row = name_row_idx + 2
-            employees = []
-            for i in range(data_start_row, df.shape[0]):
-                row = df.iloc[i]
-                jobdesk = str(row.iloc[0]).strip()
-                if not jobdesk or jobdesk == "nan":
-                    continue
-                name = str(row.iloc[1]).strip()
-                if name in ["nan", ""]:
-                    continue
-
-                # Get attendance values (skip first 2 columns: Jobdesk, Name)
-                att_values = row.iloc[2:].tolist()[:len(dates)]
-
-                for j, val in enumerate(att_values):
-                    val = str(val).strip()
-                    if val in ["", "nan"]:
+            if not dates:
+                st.error("❌ Tidak ditemukan kolom tanggal.")
+            else:
+                records = []
+                for row_idx in data_rows:
+                    jobdesk = str(df.iloc[row_idx, 0]).strip()
+                    name = str(df.iloc[row_idx, 1]).strip()
+                    if not name or name == "nan":
                         continue
 
-                    # Determine remarks
-                    remarks = ""
-                    shift_code = val
-                    if val in ["OFF", "CUTI"]:
-                        remarks = val
-                        shift_code = ""
-                    else:
-                        # Try to map shift code
-                        if val not in SHIFT_MAP:
-                            st.warning(f"Kode shift '{val}' tidak dikenali untuk {name} pada {dates[j]}")
+                    # Ambil nilai absensi dari kolom 2 ke kanan (sesuai jumlah tanggal)
+                    att_vals = df.iloc[row_idx, 2:2+len(dates)].astype(str).tolist()
 
-                    # Build record
-                    record = {
-                        "Work Area": jobdesk,
-                        "Employee Name": name,
-                        "Job Position": shift_code if shift_code else "",
-                        "Day": days[j],
-                        "Date (DD/MM/YYYY)": dates[j],
-                        "Shift": shift_code,
-                        "Shift Check In": SHIFT_MAP.get(shift_code, {}).get("check_in", "") if shift_code else "",
-                        "Shift Check Out": SHIFT_MAP.get(shift_code, {}).get("check_out", "") if shift_code else "",
-                        "Remarks": remarks,
-                    }
-                    employees.append(record)
+                    for j, val in enumerate(att_vals):
+                        val = val.strip()
+                        if val in ["", "nan"]:
+                            continue
 
-            # Convert to DataFrame
-            result_df = pd.DataFrame(employees)
-            st.success(f"✅ Berhasil memproses {len(employees)} baris data.")
+                        remarks = ""
+                        shift_code = val
+                        if val in ["OFF", "CUTI"]:
+                            remarks = val
+                            shift_code = ""
 
-            # Show preview
-            st.dataframe(result_df.head(50))
+                        # Cari mapping check-in/out berdasarkan (Work Area, Shift)
+                        key = (jobdesk, shift_code)
+                        ci = SHIFT_MAP.get(key, {}).get("check_in", "")
+                        co = SHIFT_MAP.get(key, {}).get("check_out", "")
 
-            # Download button
-            csv = result_df.to_csv(index=False)
-            st.download_button(
-                label="📥 Download CSV",
-                data=csv,
-                file_name="absensi_formatted.csv",
-                mime="text/csv"
-            )
+                        records.append({
+                            "Work Area": jobdesk,
+                            "Employee Name": name,
+                            "Job Position": shift_code if shift_code else "",
+                            "Day": days[j] if j < len(days) else "Unknown",
+                            "Date (DD/MM/YYYY)": dates[j] if j < len(dates) else "",
+                            "Shift": shift_code,
+                            "Shift Check In": ci,
+                            "Shift Check Out": co,
+                            "Remarks": remarks
+                        })
+
+                if not records:
+                    st.warning("⚠️ Tidak ada nilai absensi yang valid (semua sel kosong atau tidak terbaca).")
+                else:
+                    result_df = pd.DataFrame(records)
+                    st.success(f"✅ Berhasil memproses {len(records)} baris data.")
+                    st.dataframe(result_df)
+                    csv = result_df.to_csv(index=False)
+                    st.download_button("📥 Download CSV", csv, "absensi_formatted.csv", "text/csv")
 
     except Exception as e:
-        st.error(f"Error saat membaca file: {e}")
+        st.error(f"Error: {e}")
         st.exception(e)
